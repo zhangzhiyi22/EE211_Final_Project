@@ -1,0 +1,413 @@
+import rclpy
+from rclpy.node import Node
+from nav_msgs.msg import OccupancyGrid
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped
+import numpy as np
+import matplotlib.pyplot as plt
+import math
+from nav_msgs.msg import Path
+from PIL import Image
+
+class AStarPlanner:
+
+    def __init__(self, ox, oy, resolution, rr):
+        """
+        Initialize grid map for a star planning
+
+        ox: x position list of Obstacles [m]
+        oy: y position list of Obstacles [m]
+        resolution: grid resolution [m]
+        rr: robot radius[m]
+        """
+
+        self.resolution = resolution
+        self.rr = rr
+        self.min_x, self.min_y = 0, 0
+        self.max_x, self.max_y = 0, 0
+        self.obstacle_map = None
+        self.x_width, self.y_width = 0, 0
+        self.motion = self.get_motion_model()
+        self.calc_obstacle_map(ox, oy)
+
+    class Node:
+        def __init__(self, x, y, cost, parent_index):
+            self.x = x  # index of grid
+            self.y = y  # index of grid
+            self.cost = cost
+            self.parent_index = parent_index
+
+        def __str__(self):
+            return str(self.x) + "," + str(self.y) + "," + str(
+                self.cost) + "," + str(self.parent_index)
+
+    def planning(self, sx, sy, gx, gy):
+        """
+        A star path search
+
+        input:
+            s_x: start x position [m]
+            s_y: start y position [m]
+            gx: goal x position [m]
+            gy: goal y position [m]
+
+        output:
+            rx: x position list of the final path
+            ry: y position list of the final path
+        """
+
+        start_node = self.Node(self.calc_xy_index(sx, self.min_x),
+                               self.calc_xy_index(sy, self.min_y), 0.0, -1)
+        goal_node = self.Node(self.calc_xy_index(gx, self.min_x),
+                              self.calc_xy_index(gy, self.min_y), 0.0, -1)
+
+        open_set, closed_set = dict(), dict()
+        open_set[self.calc_grid_index(start_node)] = start_node
+
+        while True:
+            if len(open_set) == 0:
+                print("Open set is empty..")
+                break
+
+            c_id = min(
+                open_set,
+                key=lambda o: open_set[o].cost + self.calc_heuristic(goal_node,
+                                                                     open_set[
+                                                                         o]))
+            current = open_set[c_id]
+
+         
+
+            if current.x == goal_node.x and current.y == goal_node.y:
+                print("Find goal")
+                goal_node.parent_index = current.parent_index
+                goal_node.cost = current.cost
+                break
+
+            # Remove the item from the open set
+            del open_set[c_id]
+
+            # Add it to the closed set
+            closed_set[c_id] = current
+
+            # expand_grid search grid based on motion model
+            for i, _ in enumerate(self.motion):
+                node = self.Node(current.x + self.motion[i][0],
+                                 current.y + self.motion[i][1],
+                                 current.cost + self.motion[i][2], c_id)
+                n_id = self.calc_grid_index(node)
+
+                # If the node is not safe, do nothing
+                if not self.verify_node(node):
+                    continue
+
+                if n_id in closed_set:
+                    continue
+
+                if n_id not in open_set:
+                    open_set[n_id] = node  # discovered a new node
+                else:
+                    if open_set[n_id].cost > node.cost:
+                        # This path is the best until now. record it
+                        open_set[n_id] = node
+
+        rx, ry = self.calc_final_path(goal_node, closed_set)
+
+        return rx, ry
+
+    def calc_final_path(self, goal_node, closed_set):
+        # generate final course
+        rx, ry = [self.calc_grid_position(goal_node.x, self.min_x)], [
+            self.calc_grid_position(goal_node.y, self.min_y)]
+        parent_index = goal_node.parent_index
+        while parent_index != -1:
+            n = closed_set[parent_index]
+            rx.append(self.calc_grid_position(n.x, self.min_x))
+            ry.append(self.calc_grid_position(n.y, self.min_y))
+            parent_index = n.parent_index
+
+        return rx, ry
+
+    @staticmethod
+    def calc_heuristic(n1, n2):
+        w = 1.0  # weight of heuristic
+        d = w * math.hypot(n1.x - n2.x, n1.y - n2.y)
+        return d
+
+    def calc_grid_position(self, index, min_position):
+        """
+        calc grid position
+
+        :param index:
+        :param min_position:
+        :return:
+        """
+        pos = index * self.resolution + min_position
+        return pos
+
+    def calc_xy_index(self, position, min_pos):
+        return round((position - min_pos) / self.resolution)
+
+    def calc_grid_index(self, node):
+        return (node.y - self.min_y) * self.x_width + (node.x - self.min_x)
+
+    def verify_node(self, node):
+        px = self.calc_grid_position(node.x, self.min_x)
+        py = self.calc_grid_position(node.y, self.min_y)
+
+        if px < self.min_x:
+            return False
+        elif py < self.min_y:
+            return False
+        elif px >= self.max_x:
+            return False
+        elif py >= self.max_y:
+            return False
+
+        # collision check
+        if self.obstacle_map[node.x][node.y]:
+            return False
+
+        return True
+
+    # def calc_obstacle_map(self, ox, oy):
+
+    #     self.min_x = round(min(ox))
+    #     self.min_y = round(min(oy))
+    #     self.max_x = round(max(ox))
+    #     self.max_y = round(max(oy))
+    #     print("min_x:", self.min_x)
+    #     print("min_y:", self.min_y)
+    #     print("max_x:", self.max_x)
+    #     print("max_y:", self.max_y)
+
+    #     self.x_width = round((self.max_x - self.min_x) / self.resolution)
+    #     self.y_width = round((self.max_y - self.min_y) / self.resolution)
+    #     print("x_width:", self.x_width)
+    #     print("y_width:", self.y_width)
+
+    #     # obstacle map generation
+    #     self.obstacle_map = [[False for _ in range(self.y_width)]
+    #                          for _ in range(self.x_width)]
+    #     for ix in range(self.x_width):
+    #         x = self.calc_grid_position(ix, self.min_x)
+    #         for iy in range(self.y_width):
+    #             y = self.calc_grid_position(iy, self.min_y)
+    #             for iox, ioy in zip(ox, oy):
+    #                 d = math.hypot(iox - x, ioy - y)
+    #                 if d <= self.rr:
+    #                     self.obstacle_map[ix][iy] = True
+    #                     break
+                    
+                    
+    def calc_obstacle_map(self, ox, oy):
+        self.min_x = round(min(ox))
+        self.min_y = round(min(oy))
+        self.max_x = round(max(ox))
+        self.max_y = round(max(oy))
+
+        self.x_width = round((self.max_x - self.min_x) / self.resolution)
+        self.y_width = round((self.max_y - self.min_y) / self.resolution)
+
+                                       
+                    
+        self.obstacle_map = np.full((self.x_width, self.y_width), False, dtype=bool)
+
+        # 计算障碍物的网格索引
+        ox_idx = np.round((np.array(ox) - self.min_x) / self.resolution).astype(int)
+        oy_idx = np.round((np.array(oy) - self.min_y) / self.resolution).astype(int)
+
+        # 膨胀障碍物
+        expand_size = int(0.3 / self.resolution)  # 膨胀的格子数
+        for x, y in zip(ox_idx, oy_idx):
+            # 使用np.clip确保膨胀不会超出地图边界
+            x_indices = np.clip(np.arange(x - expand_size, x + expand_size + 1), 0, self.x_width - 1)
+            y_indices = np.clip(np.arange(y - expand_size, y + expand_size + 1), 0, self.y_width - 1)
+
+            # 使用NumPy的广播规则来更新障碍物网格
+            self.obstacle_map[np.ix_(x_indices, y_indices)] = True
+     
+        
+               
+    
+    
+    
+    # def calc_obstacle_map(self, ox, oy):
+    #     self.min_x = round(min(ox))
+    #     self.min_y = round(min(oy))
+    #     self.max_x = round(max(ox))
+    #     self.max_y = round(max(oy))
+
+    #     self.x_width = round((self.max_x - self.min_x) / self.resolution)
+    #     self.y_width = round((self.max_y - self.min_y) / self.resolution)
+
+    #     self.obstacle_map = np.full((self.x_width, self.y_width), False, dtype=bool)
+
+    #     # 计算障碍物膨胀的网格数量
+    #     expand_cells = int(np.ceil(self.rr / self.resolution))
+
+    #     # 将障碍物坐标转换为网格索引
+    #     ox_idx = np.round((np.array(ox) - self.min_x) / self.resolution).astype(int)
+    #     oy_idx = np.round((np.array(oy) - self.min_y) / self.resolution).astype(int)
+
+    #     # 使用np.clip防止索引越界
+    #     ox_idx = np.clip(ox_idx, expand_cells, self.x_width - expand_cells - 1)
+    #     oy_idx = np.clip(oy_idx, expand_cells, self.y_width - expand_cells - 1)
+
+    #     # 膨胀障碍物
+    #     for i in range(-expand_cells, expand_cells + 1):
+    #         for j in range(-expand_cells, expand_cells + 1):
+    #             self.obstacle_map[ox_idx + i, oy_idx + j] = True
+
+       
+       
+       
+       
+    @staticmethod
+    def get_motion_model():
+        # dx, dy, cost
+        motion = [[1, 0, 1],
+                  [0, 1, 1],
+                  [-1, 0, 1],
+                  [0, -1, 1],
+                  [-1, -1, math.sqrt(2)],
+                  [-1, 1, math.sqrt(2)],
+                  [1, -1, math.sqrt(2)],
+                  [1, 1, math.sqrt(2)]]
+
+        return motion
+
+
+
+   
+def chunk_list(my_list, chunk_size):
+    # 使用生成器表达式创建一个生成器，每次生成长度为chunk_size的子列表
+    chunks = (my_list[i:i+chunk_size] for i in range(0, len(my_list), chunk_size))
+    
+    # 将生成器转换为列表并返回
+    return list(chunks)
+
+
+
+
+class PathPlannerNode(Node):
+
+    def __init__(self):
+        super().__init__('path_planner_node')
+        self.subscription_map = self.create_subscription(OccupancyGrid, 'map', self.map_callback, 10)
+        self.subscription_initial_pose = self.create_subscription(PoseWithCovarianceStamped, 'initialpose', self.initial_pose_callback, 10)
+        self.subscription_goal_pose = self.create_subscription(PoseStamped, 'goal_pose', self.goal_pose_callback, 10)
+        self.path_publisher = self.create_publisher(Path, '/plan', 10)
+        self.map = None
+        self.initial_pose =  None
+        self.goal_pose = None
+
+
+        self.map_loaded = False  # 假设这是一个标志，表示地图是否已加载
+
+        # 如果地图已加载，则立即计算路径
+        if self.map_loaded:
+            self.calculate_path()
+
+    def map_callback(self, msg):
+       
+        self.get_logger().info('Map received')
+        # 保留原始的OccupancyGrid消息
+        self.map = msg
+
+        # 处理地图数据并存储在map_array中
+        map_width = msg.info.width
+        map_height = msg.info.height
+        map_data = msg.data
+        #map_array = np.array(map_data).reshape((map_height*20, map_width*20))
+        result = chunk_list(map_data,map_width)
+        
+        
+        
+       # map_array = np.where(map_array > 0, 1, 0)
+        self.map_array = result
+
+    def initial_pose_callback(self, msg):
+        self.get_logger().info('Initial pose received')
+        self.initial_pose = msg.pose.pose
+        
+
+    def goal_pose_callback(self, msg):
+        self.get_logger().info('Goal pose received')
+        self.goal_pose = msg.pose
+        self.calculate_path()
+
+    def calculate_path(self):
+         if self.map is not None and self.initial_pose is not None and self.goal_pose is not None:
+            ox, oy = self.create_obstacle_list()
+            sx, sy = self.world_to_map(self.initial_pose.position.x, self.initial_pose.position.y)
+            gx, gy = self.world_to_map(self.goal_pose.position.x, self.goal_pose.position.y)
+
+            grid_size = 2
+            robot_radius = 4  # 根据实际情况调整
+            
+            a_star = AStarPlanner(ox, oy, grid_size, robot_radius)
+            rx, ry = a_star.planning(sx, sy, gx, gy)
+            
+            if rx is not None and ry is not None:
+                self.publish_path((rx, ry))
+                self.get_logger().info('Path published')
+            else:
+                self.get_logger().info('No path found')
+
+    def create_obstacle_list(self):
+        ox, oy = [], []
+        for ix in range(len(self.map_array[0])):
+            for iy in range(len(self.map_array)):
+                if self.map_array[iy][ix] > 0.5 :  # 障碍物
+                    ox.append(ix)
+                    oy.append(iy)
+        return ox, oy
+
+    def world_to_map(self, x, y):
+        # Convert world coordinates to map coordinates
+        mx = int((x - (-9.4)) / self.map.info.resolution)
+        my = int((y - (-12.6)) / self.map.info.resolution)
+        return mx, my
+    
+    def map_to_world(self, mx, my):
+            wx = mx * self.map.info.resolution + self.map.info.origin.position.x
+            wy = my * self.map.info.resolution + self.map.info.origin.position.y
+            return wx, wy
+
+
+
+    def publish_path(self, path):
+        path_msg = Path()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
+        path_msg.header.frame_id = 'map'
+
+        for x, y in zip(path[0], path[1]):
+            pose = PoseStamped()
+            pose.header = path_msg.header
+            # 将栅格坐标转换回世界坐标
+            wx, wy = self.map_to_world(x, y)
+            pose.pose.position.x = wx
+            pose.pose.position.y = wy
+            pose.pose.orientation.w = 1.0
+            path_msg.poses.append(pose)
+
+        self.path_publisher.publish(path_msg)
+
+    def create_default_pose(self, x, y):
+        pose = PoseStamped()
+        pose.header.frame_id = "map"
+        pose.header.stamp = self.get_clock().now().to_msg()
+        pose.pose.position.x = x
+        pose.pose.position.y = y
+        pose.pose.orientation.w = 1.0  # 表示没有旋转
+        return pose
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = PathPlannerNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
